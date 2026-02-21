@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cart</title>
+    <style>
+      :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #0b0b0f; }
+      body { margin: 0; padding: 16px; background: #f6f8fb; }
+      main { max-width: 520px; margin: 0 auto; background: #fff; border-radius: 16px; padding: 16px; box-shadow: 0 12px 24px rgba(15,23,42,.08); }
+      h2 { margin: 0 0 12px; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      input, button { border-radius: 10px; border: 1px solid #cad3e0; padding: 10px 12px; font-size: 14px; }
+      button { border: none; background: #111bf5; color: #fff; font-weight: 600; cursor: pointer; }
+      button.secondary { background: #111827; }
+      button.danger { background: #dc2626; }
+      button:disabled { opacity: .7; cursor: not-allowed; }
+      table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+      th, td { text-align: left; padding: 10px 6px; border-bottom: 1px solid #eef2f7; }
+      th { font-size: 12px; color: #6b7280; }
+      .muted { color: #6b7280; font-size: 12px; }
+      .qty { width: 70px; }
+      .price { width: 110px; }
+      .actions { width: 110px; }
+      .total { display: flex; justify-content: space-between; margin-top: 12px; font-weight: 700; }
+      .bar { display:flex; gap:8px; margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h2>상품카트</h2>
+
+      <form id="add-form" class="row" autocomplete="off">
+        <input id="name" placeholder="상품명" required />
+        <input id="price" class="price" placeholder="가격" type="number" min="0" step="1" required />
+        <input id="qty" class="qty" placeholder="수량" type="number" min="1" step="1" value="1" required />
+        <button type="submit">추가</button>
+      </form>
+
+      <div class="muted" id="status"></div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>상품</th>
+            <th class="price">가격</th>
+            <th class="qty">수량</th>
+            <th class="actions">삭제</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+
+      <div class="total">
+        <div>합계</div>
+        <div id="total">0</div>
+      </div>
+
+      <div class="bar">
+        <button id="refresh" class="secondary" type="button">새로고침</button>
+        <button id="clear" class="danger" type="button">비우기</button>
+        <button id="checkout" type="button">체크아웃(데모)</button>
+      </div>
+    </main>
+
+    <script type="module">
+      const rowsEl = document.querySelector("#rows");
+      const totalEl = document.querySelector("#total");
+      const statusEl = document.querySelector("#status");
+
+      const formEl = document.querySelector("#add-form");
+      const nameEl = document.querySelector("#name");
+      const priceEl = document.querySelector("#price");
+      const qtyEl = document.querySelector("#qty");
+      const refreshBtn = document.querySelector("#refresh");
+      const clearBtn = document.querySelector("#clear");
+      const checkoutBtn = document.querySelector("#checkout");
+
+      let cart = [];
+
+      const money = (n) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(n);
+
+      function render() {
+        rowsEl.innerHTML = "";
+        let total = 0;
+
+        for (const item of cart) {
+          total += item.price * item.qty;
+
+          const tr = document.createElement("tr");
+
+          const nameTd = document.createElement("td");
+          nameTd.textContent = item.name;
+
+          const priceTd = document.createElement("td");
+          priceTd.textContent = money(item.price);
+
+          const qtyTd = document.createElement("td");
+          const qtyInput = document.createElement("input");
+          qtyInput.type = "number";
+          qtyInput.min = "1";
+          qtyInput.step = "1";
+          qtyInput.value = String(item.qty);
+          qtyInput.className = "qty";
+          qtyInput.onchange = async () => {
+            const nextQty = Number(qtyInput.value || "1");
+            await callTool("update_qty", { id: item.id, qty: Math.max(1, nextQty) });
+          };
+          qtyTd.appendChild(qtyInput);
+
+          const actTd = document.createElement("td");
+          const delBtn = document.createElement("button");
+          delBtn.className = "danger";
+          delBtn.type = "button";
+          delBtn.textContent = "삭제";
+          delBtn.onclick = async () => callTool("remove_item", { id: item.id });
+          actTd.appendChild(delBtn);
+
+          tr.appendChild(nameTd);
+          tr.appendChild(priceTd);
+          tr.appendChild(qtyTd);
+          tr.appendChild(actTd);
+          rowsEl.appendChild(tr);
+        }
+
+        totalEl.textContent = money(total);
+      }
+
+      function updateFromResponse(response) {
+        const next = response?.structuredContent?.cart;
+        if (Array.isArray(next)) {
+          cart = next;
+          render();
+        }
+        const msg = response?.content?.[0]?.text;
+        statusEl.textContent = msg ?? "";
+      }
+
+      // -------- MCP Apps bridge (JSON-RPC over postMessage) --------
+      let rpcId = 0;
+      const pending = new Map();
+
+      const rpcRequest = (method, params) =>
+        new Promise((resolve, reject) => {
+          const id = ++rpcId;
+          pending.set(id, { resolve, reject });
+          window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        });
+
+      const rpcNotify = (method, params) =>
+        window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
+        const msg = event.data;
+        if (!msg || msg.jsonrpc !== "2.0") return;
+
+        // response to request
+        if (typeof msg.id === "number") {
+          const p = pending.get(msg.id);
+          if (!p) return;
+          pending.delete(msg.id);
+          if (msg.error) p.reject(msg.error);
+          else p.resolve(msg.result);
+          return;
+        }
+
+        // notifications (model-initiated tool calls etc.)
+        if (msg.method === "ui/notifications/tool-result") {
+          updateFromResponse(msg.params);
+        }
+      }, { passive: true });
+
+      async function initializeBridge() {
+        await rpcRequest("ui/initialize", {
+          appInfo: { name: "cart-widget", version: "0.1.0" },
+          appCapabilities: {},
+          protocolVersion: "2026-01-26",
+        });
+        rpcNotify("ui/notifications/initialized", {});
+      }
+
+      const bridgeReady = initializeBridge();
+
+      async function callTool(name, args) {
+        await bridgeReady;
+        const res = await rpcRequest("tools/call", { name, arguments: args });
+        updateFromResponse(res);
+      }
+
+      // initial load
+      await callTool("get_cart", {});
+
+      formEl.onsubmit = async (e) => {
+        e.preventDefault();
+        const name = nameEl.value.trim();
+        const price = Number(priceEl.value || "0");
+        const qty = Number(qtyEl.value || "1");
+        if (!name) return;
+        await callTool("add_item", { name, price: Math.max(0, price), qty: Math.max(1, qty) });
+        nameEl.value = "";
+        qtyEl.value = "1";
+      };
+
+      refreshBtn.onclick = () => callTool("get_cart", {});
+      clearBtn.onclick = () => callTool("clear_cart", {});
+      checkoutBtn.onclick = () => callTool("checkout_demo", {});
+    </script>
+  </body>
+</html>
